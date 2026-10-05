@@ -94,24 +94,41 @@ class HRouter {
           .toUpperCase()
           .contains(mac.toUpperCase());
 
+  String blockLog = '';
+  Future<String> _filterLines() async {
+    final p = await _get('/html/bbsp/macfilter/macfilter.asp');
+    final ls = p
+        .split('\n')
+        .where((l) => RegExp(r'macfilter|Mode|Enable', caseSensitive: false).hasMatch(l))
+        .join('\n');
+    return ls.length > 2500 ? ls.substring(0, 2500) : ls;
+  }
+
   Future<bool> block(String mac) async {
-    final t = await _token();
-    await _post(
-        '/html/bbsp/macfilter/add.cgi?x=InternetGatewayDevice.X_HW_Security.MacFilter.%7Bi%7D&RequestFile=html/bbsp/macfilter/macfilter.asp',
-        {'x.SourceMACAddress': mac, 'x.X_HW_Token': t});
-    return _listed(mac);
+    blockLog = '--- BEFORE\n${await _filterLines()}\n';
+    for (final x in [
+      'InternetGatewayDevice.X_HW_Security.MacFilter',
+      'InternetGatewayDevice.X_HW_Security.MacFilter.%7Bi%7D'
+    ]) {
+      final t = await _token();
+      final r = await _post(
+          '/html/bbsp/macfilter/add.cgi?x=$x&RequestFile=html/bbsp/macfilter/macfilter.asp',
+          {'x.SourceMACAddress': mac, 'x.X_HW_Token': t});
+      blockLog += '--- ADD $x status ${r.statusCode}\n${r.body.length > 300 ? r.body.substring(0, 300) : r.body}\n';
+      if (await _listed(mac)) return true;
+    }
+    blockLog += '--- AFTER\n${await _filterLines()}\n\n';
+    return false;
   }
 
   Future<bool> unblock(String mac) async {
     final page = await _get('/html/bbsp/macfilter/macfilter.asp');
-    final line = page
-        .split('\n')
-        .firstWhere((l) => l.toUpperCase().contains(mac.toUpperCase()),
-            orElse: () => '');
-    final d = RegExp(r'InternetGatewayDevice\.X_HW_Security\.MacFilter\.\d+')
-        .firstMatch(line)
-        ?.group(0);
-    if (d == null) return false;
+    final i = page.toUpperCase().indexOf(mac.toUpperCase());
+    if (i < 0) return true; // already not in router list
+    final before = page.substring(i > 400 ? i - 400 : 0, i);
+    final all = RegExp(r'InternetGatewayDevice\.X_HW_Security\.MacFilter\.\d+').allMatches(before);
+    if (all.isEmpty) return false;
+    final d = all.last.group(0);
     final t = await _token();
     await _post(
         '/html/bbsp/macfilter/del.cgi?x=$d&RequestFile=html/bbsp/macfilter/macfilter.asp',
@@ -198,6 +215,7 @@ class _HomeState extends State<Home> {
   List<Dev> devs = [];
   Map<String, String> blocked = {}; // mac -> name
   Map<String, dynamic> hist = {}; // mac -> {name, days:[]}
+  Map<String, String> names = {}; // mac -> custom name
   late SharedPreferences p;
 
   @override
@@ -210,6 +228,7 @@ class _HomeState extends State<Home> {
     p = await SharedPreferences.getInstance();
     blocked = Map<String, String>.from(jsonDecode(p.getString('blocked') ?? '{}'));
     hist = Map<String, dynamic>.from(jsonDecode(p.getString('hist') ?? '{}'));
+    names = Map<String, String>.from(jsonDecode(p.getString('names') ?? '{}'));
     await _refresh();
   }
 
@@ -229,6 +248,26 @@ class _HomeState extends State<Home> {
     } catch (e) {
       _msg('Refresh error: $e');
     }
+    if (mounted) setState(() {});
+  }
+
+  String _nm(String mac, String fallback) => names[mac] ?? fallback;
+
+  Future<void> _rename(String mac, String current, String routerName) async {
+    final c = TextEditingController(text: current);
+    final v = await showDialog<String>(
+        context: context,
+        builder: (_) => AlertDialog(
+              title: const Text('Naam badlein'),
+              content: TextField(controller: c, autofocus: true, decoration: InputDecoration(hintText: routerName, helperText: 'Khali chorein to asli naam wapas aa jayega')),
+              actions: [
+                TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
+                FilledButton(onPressed: () => Navigator.pop(context, c.text.trim()), child: const Text('Save')),
+              ],
+            ));
+    if (v == null) return;
+    v.isEmpty ? names.remove(mac) : names[mac] = v;
+    await p.setString('names', jsonEncode(names));
     if (mounted) setState(() {});
   }
 
@@ -253,12 +292,15 @@ class _HomeState extends State<Home> {
         child: ListView(children: [
           for (final d in devs)
             ListTile(
-              title: Text(d.name),
+              title: Text(_nm(d.mac, d.name)),
               subtitle: Text('${d.ip}\n${d.mac}'),
               isThreeLine: true,
-              trailing: Switch(
-                  value: blocked.containsKey(d.mac),
-                  onChanged: (v) => _toggle(d.mac, d.name, v)),
+              trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+                IconButton(icon: const Icon(Icons.edit, size: 20), onPressed: () => _rename(d.mac, _nm(d.mac, d.name), d.name)),
+                Switch(
+                    value: blocked.containsKey(d.mac),
+                    onChanged: (v) => _toggle(d.mac, _nm(d.mac, d.name), v)),
+              ]),
             ),
         ]),
       );
@@ -267,9 +309,12 @@ class _HomeState extends State<Home> {
         if (blocked.isEmpty) const Padding(padding: EdgeInsets.all(24), child: Text('Koi blocked device nahi')),
         for (final e in blocked.entries)
           ListTile(
-            title: Text(e.value),
+            title: Text(_nm(e.key, e.value)),
             subtitle: Text(e.key),
-            trailing: Switch(value: true, onChanged: (_) => _toggle(e.key, e.value, false)),
+            trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+              IconButton(icon: const Icon(Icons.edit, size: 20), onPressed: () => _rename(e.key, _nm(e.key, e.value), e.value)),
+              Switch(value: true, onChanged: (_) => _toggle(e.key, _nm(e.key, e.value), false)),
+            ]),
           ),
       ]);
 
@@ -277,7 +322,7 @@ class _HomeState extends State<Home> {
     final from = DateTime.now().subtract(const Duration(days: 7)).toIso8601String().substring(0, 10);
     final rows = hist.entries.map((e) {
       final days = (e.value['days'] as List).where((d) => d.compareTo(from) >= 0).toList()..sort();
-      return [e.value['name'], e.key, days];
+      return [_nm(e.key, e.value['name']), e.key, days];
     }).where((r) => (r[2] as List).isNotEmpty).toList()
       ..sort((a, b) => (b[2] as List).length.compareTo((a[2] as List).length));
     return ListView(children: [
@@ -295,7 +340,7 @@ class _HomeState extends State<Home> {
   @override
   Widget build(BuildContext c) => Scaffold(
         appBar: AppBar(title: Text(['Devices (${devs.length})', 'Block List', 'Weekly Report'][tab]), actions: [
-          IconButton(icon: const Icon(Icons.bug_report), onPressed: () => showDialog(context: context, builder: (_) => AlertDialog(title: const Text('Debug (copy karke bhejein)'), content: SingleChildScrollView(child: SelectableText(widget.r.lastRaw.isEmpty ? 'Khali' : widget.r.lastRaw))))),
+          IconButton(icon: const Icon(Icons.bug_report), onPressed: () => showDialog(context: context, builder: (_) => AlertDialog(title: const Text('Debug (copy karke bhejein)'), content: SingleChildScrollView(child: SelectableText(widget.r.blockLog + widget.r.lastRaw))))),
           IconButton(icon: const Icon(Icons.refresh), onPressed: _refresh)
         ]),
         body: [_devices(), _blockList(), _report()][tab],

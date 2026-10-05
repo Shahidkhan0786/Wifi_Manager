@@ -20,7 +20,7 @@ class HRouter {
   String cookie = 'Cookie=body:Language:english:id=-1;path=/';
   HRouter(String ip) : base = 'http://$ip';
   Map<String, String> get _h =>
-      {'Cookie': cookie, 'Content-Type': 'application/x-www-form-urlencoded'};
+      {'Referer': '$base/', 'Cookie': cookie, 'Content-Type': 'application/x-www-form-urlencoded'};
   Future<http.Response> _post(String p, Map<String, String> b) =>
       http.post(Uri.parse(base + p), headers: _h, body: b)
           .timeout(const Duration(seconds: 8));
@@ -49,21 +49,42 @@ class HRouter {
     return false;
   }
 
+  String lastRaw = '';
+  String _dec(String s) => s.replaceAllMapped(RegExp(r'\\x([0-9a-fA-F]{2})'),
+      (m) => String.fromCharCode(int.parse(m.group(1)!, radix: 16)));
+
   Future<List<Dev>> devices() async {
-    final b = await _get('/html/bbsp/common/GetLanUserDevInfo.asp');
+    final paths = [
+      '/html/bbsp/common/GetLanUserDevInfo.asp',
+      '/html/bbsp/common/GetLanUserInfo.asp',
+      '/html/bbsp/userdevinfo/userdevinfo.asp'
+    ];
     final out = <Dev>[];
+    lastRaw = '';
     final ipRe = RegExp(r'^\d+\.\d+\.\d+\.\d+$');
-    final macRe = RegExp(r'^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$');
-    for (final m in RegExp(r'USERDevice\s*\(([^)]*)\)').allMatches(b)) {
-      final f = RegExp(r'"([^"]*)"')
-          .allMatches(m.group(1)!)
-          .map((x) => x.group(1)!)
-          .toList();
-      final mac = f.firstWhere(macRe.hasMatch, orElse: () => '');
-      if (mac.isEmpty) continue;
-      final ip = f.firstWhere(ipRe.hasMatch, orElse: () => '');
-      final name = f.length > 9 && f[9].isNotEmpty ? f[9] : 'Unknown';
-      out.add(Dev(name, ip, mac.toUpperCase()));
+    final macRe = RegExp(r'^([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}$');
+    for (final path in paths) {
+      String b;
+      try {
+        final r = await http.get(Uri.parse(base + path), headers: _h).timeout(const Duration(seconds: 8));
+        b = _dec(r.body);
+        lastRaw += '=== $path  status ${r.statusCode}  len ${b.length}\n${b.length > 1500 ? b.substring(0, 1500) : b}\n\n';
+      } catch (e) {
+        lastRaw += '=== $path  ERROR $e\n\n';
+        continue;
+      }
+      for (final m in RegExp(r'USERDevice\s*\(([^)]*)\)').allMatches(b)) {
+        final f = RegExp(r"""["']([^"']*)["']""")
+            .allMatches(m.group(1)!)
+            .map((x) => x.group(1)!)
+            .toList();
+        final mac = f.firstWhere(macRe.hasMatch, orElse: () => '');
+        if (mac.isEmpty) continue;
+        final ip = f.firstWhere(ipRe.hasMatch, orElse: () => '');
+        final name = f.length > 9 && f[9].isNotEmpty ? f[9] : 'Unknown';
+        out.add(Dev(name, ip, mac.toUpperCase().replaceAll('-', ':')));
+      }
+      if (out.isNotEmpty) break;
     }
     return out;
   }
@@ -274,6 +295,7 @@ class _HomeState extends State<Home> {
   @override
   Widget build(BuildContext c) => Scaffold(
         appBar: AppBar(title: Text(['Devices (${devs.length})', 'Block List', 'Weekly Report'][tab]), actions: [
+          IconButton(icon: const Icon(Icons.bug_report), onPressed: () => showDialog(context: context, builder: (_) => AlertDialog(title: const Text('Debug (copy karke bhejein)'), content: SingleChildScrollView(child: SelectableText(widget.r.lastRaw.isEmpty ? 'Khali' : widget.r.lastRaw))))),
           IconButton(icon: const Icon(Icons.refresh), onPressed: _refresh)
         ]),
         body: [_devices(), _blockList(), _report()][tab],

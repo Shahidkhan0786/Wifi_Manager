@@ -1,0 +1,22 @@
+name: Build APK
+on: [push, workflow_dispatch]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: {distribution: temurin, java-version: '17'}
+      - uses: subosito/flutter-action@v2
+        with: {channel: stable}
+      - run: flutter create --platforms=android --project-name wifi_manager .
+      - run: flutter pub add http network_info_plus shared_preferences
+      - run: cp main.dart lib/main.dart
+      - run: |
+          M=android/app/src/main/AndroidManifest.xml
+          sed -i 's|<application|<uses-permission android:name="android.permission.INTERNET"/><uses-permission android:name="android.permission.ACCESS_WIFI_STATE"/><application android:usesCleartextTraffic="true"|' $M
+      - run: flutter build apk --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wifi-manager-apk
+          path: build/app/outputs/flutter-apk/app-release.apk
